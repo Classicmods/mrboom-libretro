@@ -51,6 +51,8 @@ else ifneq ($(findstring Darwin,$(shell uname -a)),)
 	arch = intel
 else ifneq ($(findstring FreeBSD,$(shell uname -o)),)
 	system_platform = freebsd
+else ifneq ($(findstring Haiku,$(shell uname -o)),)
+	system_platform = haiku
 ifeq ($(shell uname -p),powerpc)
 	arch = ppc
 	CFLAGS += -DMSB_FIRST
@@ -63,7 +65,6 @@ else ifeq ($(shell uname -p),ppc)
 endif
 
 TARGET_NAME := mrboom
-LIBM		= -lm
 
 ifeq ($(ARCHFLAGS),)
 ifeq ($(archs),ppc)
@@ -98,6 +99,9 @@ ifeq ($(platform), unix)
    TARGET := $(TARGET_NAME)_libretro.$(EXT)
    fpic := -fPIC
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
+   ifeq ($(system_platform), haiku)
+	LDFLAGS += -lroot -lnetwork
+   endif
 else ifeq ($(platform), linux-portable)
    TARGET := $(TARGET_NAME)_libretro.$(EXT)
    fpic := -fPIC -nostdlib
@@ -129,10 +133,10 @@ endif
 endif
 ifeq ($(platform),$(filter $(platform),ios9 ios-arm64))
 CC     += -miphoneos-version-min=8.0
-CFLAGS += -miphoneos-version-min=8.0
+CFLAGS += -miphoneos-version-min=8.0 -DDONT_WANT_ARM_OPTIMIZATIONS
 else
 CC     += -miphoneos-version-min=5.0
-CFLAGS += -miphoneos-version-min=5.0 -DIOS
+CFLAGS += -miphoneos-version-min=5.0 -DIOS -DDONT_WANT_ARM_OPTIMIZATIONS
 endif
 
 # QNX
@@ -184,9 +188,9 @@ else ifeq ($(platform), libnx)
                  -fPIE -I$(LIBNX)/include/ -ffunction-sections -fdata-sections -ftls-model=local-exec -Wl,--allow-multiple-definition -specs=$(LIBNX)/switch.specs
     CFLAGS += $(INCDIRS)
     CFLAGS	+=	-D__SWITCH__ -DHAVE_LIBNX -march=armv8-a -mtune=cortex-a57 -mtp=soft
-    CXXFLAGS := $(ASFLAGS) $(CFLAGS) -fno-rtti -std=gnu++11
+    CXXFLAGS := $(ASFLAGS) -fno-rtti -std=gnu++11
     CFLAGS += -std=gnu11
-    CFLAGS += -DUSE_FILE32API -DNO_NETWORK
+    CFLAGS += -DUSE_FILE32API
     STATIC_LINKING = 1
 
 # Nintendo WiiU
@@ -228,6 +232,7 @@ else ifeq ($(platform), classic_armv7_a7)
 	CXXFLAGS += $(CFLAGS)
 	CPPFLAGS += $(CFLAGS)
 	ASFLAGS += $(CFLAGS)
+	HAVE_NEON = 1
 	ifeq ($(shell echo `$(CC) -dumpversion` "< 4.9" | bc -l), 1)
 	  CFLAGS += -march=armv7-a
 	else
@@ -239,6 +244,17 @@ else ifeq ($(platform), classic_armv7_a7)
 	endif
 #######################################
 
+else ifeq ($(platform), genode)
+   TARGET   := $(TARGET_NAME)_libretro.lib.so
+   CC       := $(shell pkg-config genode-base --variable=cc)
+   CXX      := $(shell pkg-config genode-base --variable=cxx)
+   LD       := $(shell pkg-config genode-base --variable=ld)
+   CFLAGS   += $(shell pkg-config --cflags genode-libc)
+   CXXFLAGS += $(shell pkg-config --cflags genode-stdcxx)
+   LDFLAGS  += -shared --version-script=link.T
+   LDFLAGS  += $(shell pkg-config --libs genode-lib genode-libc genode-stdcxx)
+   LIBM =
+
 # Windows MSVC 2003 Xbox 1
 else ifeq ($(platform), xbox1_msvc2003)
 TARGET := $(TARGET_NAME)_libretro_xdk1.lib
@@ -246,8 +262,6 @@ CC  = CL.exe
 CXX  = CL.exe
 LD   = lib.exe
 LOAD_FROM_FILES := 1
-CFLAGS += -DLOAD_FROM_FILES
-LDFLAGS += -lminizip
 export INCLUDE := $(XDK)/xbox/include
 export LIB := $(XDK)/xbox/lib
 PATH := $(call unixcygpath,$(XDK)/xbox/bin/vc71):$(PATH)
@@ -301,7 +315,13 @@ else
    SHARED := -shared -static-libgcc -static-libstdc++ -s -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
 endif
 
+LIBM    ?= -lm
 LDFLAGS += $(LIBM)
+
+ifneq ($(LOAD_FROM_FILES),)
+CFLAGS += -DLOAD_FROM_FILES
+LDFLAGS += -lminizip
+endif
 
 ifneq ($(DEBUG),)
 CFLAGS += -g -pg -DDEBUG
@@ -312,12 +332,14 @@ CFLAGS += -O3
 endif
 endif
 
-CFLAGS += -DMRBOOM -D_FORTIFY_SOURCE=0 -DPLATFORM=\"$(shell uname)\" -DGIT_VERSION=\"$(GIT_VERSION)\"
+CFLAGS += -DMRBOOM -DHAVE_IBXM -D_FORTIFY_SOURCE=0 -DPLATFORM=\"$(platform)\" -DGIT_VERSION=\"$(GIT_VERSION)\"
 
 SDL2LIBS :=  -lSDL2  -lSDL2_mixer -lminizip -lmodplug
 
+
 include Makefile.common
 OBJECTS := $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o)
+
 
 ifneq ($(LIBSDL2),)
 CFLAGS += -D__LIBSDL2__ -Isdl2/xBRZ 
@@ -349,8 +371,7 @@ CFLAGS += -DAITEST
 endif
 endif
 
-CXXFLAGS := $(CFLAGS) $(INCFLAGS) -Wall -pedantic $(fpic)
-
+CXXFLAGS += $(CFLAGS) $(INCFLAGS) -Wall -pedantic $(fpic)
 ifneq ($(LIBSDL2),)
 CXXFLAGS += -std=c++11
 else
@@ -380,9 +401,16 @@ $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING), 1)
 	$(AR) rcs $@ $(OBJECTS)
 else
+ifeq ($(platform),genode)
+	$(LD) -o $@ $(OBJECTS) $(LDFLAGS)
+else
 	$(CXX) $(fpic) $(SHARED) $(INCLUDES) -o $@ $(OBJECTS) $(LDFLAGS)
 endif
+endif
 	@echo "** BUILD SUCCESSFUL! GG NO RE **"
+
+%.o: %.S
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(fpic) -c -o $@ $<
@@ -402,7 +430,9 @@ CLEAN_TARGETS += $(TARGET)
 endif
 
 clean:
-	rm -f *.o */*.o */*/*.o
+	rm -f *.o */*.o */*/*.o */*/*/*.o */*/*/*/*.o */*/*/*/*/*.o
+	rm -f *.a */*.a */*/*.a */*/*/*.a */*/*/*/*.a */*/*/*/*/*.a
+	rm -f *.d */*.d */*/*.d */*/*/*.d */*/*/*/*.d */*/*/*/*/*.d
 
 strip:
 	$(STRIP) $(TARGET_NAME).out
